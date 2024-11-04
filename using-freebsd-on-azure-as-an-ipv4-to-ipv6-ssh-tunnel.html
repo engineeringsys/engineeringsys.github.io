@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>lab3 | Using FreeBSD on Azure as an IPv4 to IPv6 SSH tunnel</title>
+    <link rel="shortcut icon" type="image/png" href="./favicon.png">
+    <link rel="shortcut icon" type="image/x-icon" href="./favicon.ico">
+    <link href="https://idatum.net/feeds/all.atom.xml" type="application/atom+xml" rel="alternate" title="lab3 Full Atom Feed" />
+    <link href="https://idatum.net/feeds/bsd.atom.xml" type="application/atom+xml" rel="alternate" title="lab3 Categories Atom Feed" />
+    <link rel="stylesheet" href="./theme/css/main.css" type="text/css" />
+    <link rel="stylesheet" href="./theme/css/pygments.css" type="text/css" />
+    <meta name="generator" content="Pelican" />
+    <meta name="description" content="" />
+    <meta name="author" content="@joelp@mastodon.sdf.org" />
+
+</head>
+<body>
+    <header>
+        <nav style="overflow: hidden;">
+            <ul>
+                <li><a href="./">Home</a></li>
+                    <li><a href="./category/ads-b.html">ADS-B</a></li>
+                    <li class="active"><a href="./category/bsd.html">BSD</a></li>
+                    <li><a href="./category/home-automation.html">Home automation</a></li>
+            </ul>
+        </nav>
+        <div>
+        <h1><a href="./">
+            <image src='' class="avatar" width="50px" /><span class="site_title">lab3</span>
+            </a></h1></div>
+            <h2>case studies and observations</h2>
+        </div>
+    </header>
+    <div id="wrapper">
+        <div id="content">    <h4 class="date">Sep 02, 2024</h4>
+
+<article class="post">
+    <h2 class="title">
+        <a href="./using-freebsd-on-azure-as-an-ipv4-to-ipv6-ssh-tunnel.html" rel="bookmark" title="Permanent Link to &quot;Using FreeBSD on Azure as an IPv4 to IPv6 SSH tunnel&quot;">Using FreeBSD on Azure as an IPv4 to IPv6 SSH tunnel</a>
+    </h2>
+
+                
+    <p>When away from your home network, there are multiple options available for remote access. My choice is to use SSH to connect via IPv6.</p>
+<p>My home firewall (OpenBSD) passes in an IPv6 port to a FreeBSD jail that runs a hardened sshd daemon on my IPv6-only home lab VLAN. When I'm away, my laptop usually has IPv6 via my tethered mobile phone and I can connect directly via IPv6. I can also use an SSH tunnel for things like connecting remotely to Home Assistant or RDP'ing into my home Windows client. When I can't get IPv6 when away, I need a way to bridge from IPv4 to IPv6.</p>
+<p>To gain access to my IPv6-only network remotely when I only have IPv4, I use a dual-stack VM as a bridge. Here are some notes how I use an Azure VM running FreeBSD for this purpose. Also, FreeBSD 14 supports .NET, so I run a simple website for my home weather station data. And finally, with ZFS as the root partition (zroot), I have all the goodness of ZFS snapshots, etc.</p>
+<h4>Creating an Azure FreeBSD VM with a ZFS root</h4>
+<p>When creating a VM in Azure, you can choose several operating systems in Marketplace including FreeBSD. In my case I chose FreeBSD 14.1-RELEASE (ZFS) on x64. There is also an ARM64 option, but I want to run .NET 8 workloads and this is not yet available on ARM64. I chose a B-series size with 1gb. This is more than enough RAM for this purpose.</p>
+<p>Choose to only use an SSH key to access the VM. I also enabled a System Assigned Identity since my VM needs read access to a keyvault secret and a storage account. Otherwise, it's fine to accept the defaults for remaining properties.</p>
+<p>Once your shiny new FreeBSD VM is up and running and you access via SSH, the first thing I recommend is changing the default SSH server port. Edit <code>/etc/ssh/sshd_config</code> and change <code>Port</code> from 22 to some other higher port number. This minimizes random scans from showing up in <code>/var/log/auth.log</code>. Now reboot your VM and add a custom network security group inbound port rule that matches the new port you chose. You can also change the existing SSH rule from Allow to Deny (or simply delete it).</p>
+<h4>Adding a public IPv6 address</h4>
+<p>By default, Azure will create an IPv4-only VM. What you need to do is add a new IP configuration to your network interface that has an IPv6 address. The first step is to add an IPv6 address space to your virtual network (VNET) address spaces. I added <code>2404:f800:0:1::/64</code>.</p>
+<p>Next, edit your VNET subnet (likely named <code>default</code>) and enable IPv6 addresses. Once set, you can then edit the subnet settings again and add a public IPv6 address. I chose a dynamic IPv6 address and it has been stable.</p>
+<p>Now that the VM configuration has IPv6 set, we next need to configure our FreeBSD VM to receive an IPv6 address from Azure. An Azure VM first needs an internal IPv6 address provided via the address space we added to our VNET address spaces and IPv6 IP configuration. We first need to run <code>sudo pkg install dual-dhclient</code>.</p>
+<p>Once you have <code>dual-dhclient</code> installed, add the following to your <code>/etc/rc.conf</code>:</p>
+<div class="highlight"><pre><span></span><code>ipv6_activate_all_interfaces=&quot;YES&quot;
+ifconfig_hn0_ipv6=&quot;SYNCDHCP accept_rtadv&quot;
+dhclient_program=&quot;/usr/local/sbin/dual-dhclient&quot;
+</code></pre></div>
+
+<p>Now reboot and when you log back in do an <code>ifconfig hn0</code> and you'll see the internal IPv6 we configured, e.g. <code>inet6 2404:f800:0:1::4 prefixlen 128</code>. Your VM now has a local IP that gets you to your VNET's public facing IPv6 that you previously configured in your VNET subnet. Do a simple test:</p>
+<div class="highlight"><pre><span></span><code><span class="n">ping6</span><span class="w"> </span><span class="o">-</span><span class="n">c</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="n">freebsd</span><span class="p">.</span><span class="n">org</span>
+<span class="n">PING</span><span class="p">(</span><span class="mi">56</span><span class="o">=</span><span class="mi">40</span><span class="o">+</span><span class="mi">8</span><span class="o">+</span><span class="mi">8</span><span class="w"> </span><span class="n">bytes</span><span class="p">)</span><span class="w"> </span><span class="mi">2404</span><span class="o">:</span><span class="n">f800</span><span class="o">:</span><span class="mi">0</span><span class="o">:</span><span class="mi">1</span><span class="o">::</span><span class="mi">4</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="mi">2610</span><span class="o">:</span><span class="mi">1</span><span class="n">c1</span><span class="o">:</span><span class="mi">1</span><span class="o">:</span><span class="mi">606</span><span class="n">c</span><span class="o">::</span><span class="mi">50</span><span class="o">:</span><span class="mi">15</span>
+<span class="mi">16</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="mi">2610</span><span class="o">:</span><span class="mi">1</span><span class="n">c1</span><span class="o">:</span><span class="mi">1</span><span class="o">:</span><span class="mi">606</span><span class="n">c</span><span class="o">::</span><span class="mi">50</span><span class="o">:</span><span class="mi">15</span><span class="p">,</span><span class="w"> </span><span class="n">icmp_seq</span><span class="o">=</span><span class="mi">0</span><span class="w"> </span><span class="n">hlim</span><span class="o">=</span><span class="mi">43</span><span class="w"> </span><span class="n">time</span><span class="o">=</span><span class="mf">69.095</span><span class="w"> </span><span class="n">ms</span>
+<span class="mi">16</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="mi">2610</span><span class="o">:</span><span class="mi">1</span><span class="n">c1</span><span class="o">:</span><span class="mi">1</span><span class="o">:</span><span class="mi">606</span><span class="n">c</span><span class="o">::</span><span class="mi">50</span><span class="o">:</span><span class="mi">15</span><span class="p">,</span><span class="w"> </span><span class="n">icmp_seq</span><span class="o">=</span><span class="mi">1</span><span class="w"> </span><span class="n">hlim</span><span class="o">=</span><span class="mi">43</span><span class="w"> </span><span class="n">time</span><span class="o">=</span><span class="mf">68.517</span><span class="w"> </span><span class="n">ms</span>
+<span class="mi">16</span><span class="w"> </span><span class="n">bytes</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="mi">2610</span><span class="o">:</span><span class="mi">1</span><span class="n">c1</span><span class="o">:</span><span class="mi">1</span><span class="o">:</span><span class="mi">606</span><span class="n">c</span><span class="o">::</span><span class="mi">50</span><span class="o">:</span><span class="mi">15</span><span class="p">,</span><span class="w"> </span><span class="n">icmp_seq</span><span class="o">=</span><span class="mi">2</span><span class="w"> </span><span class="n">hlim</span><span class="o">=</span><span class="mi">43</span><span class="w"> </span><span class="n">time</span><span class="o">=</span><span class="mf">68.514</span><span class="w"> </span><span class="n">ms</span>
+
+<span class="o">---</span><span class="w"> </span><span class="n">freebsd</span><span class="p">.</span><span class="n">org</span><span class="w"> </span><span class="n">ping</span><span class="w"> </span><span class="n">statistics</span><span class="w"> </span><span class="o">---</span>
+<span class="mi">3</span><span class="w"> </span><span class="n">packets</span><span class="w"> </span><span class="n">transmitted</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="n">packets</span><span class="w"> </span><span class="n">received</span><span class="p">,</span><span class="w"> </span><span class="mf">0.0</span><span class="o">%</span><span class="w"> </span><span class="n">packet</span><span class="w"> </span><span class="n">loss</span>
+</code></pre></div>
+
+<p>Cool, we have a dual-stack VM. Now we need to connect your home lab SSH server to your Azure FreeBSD VM.</p>
+<h4>Adding an SSH tunnel to connect to your FreeBSD VM</h4>
+<p>What we'll do is add an SSH reverse tunnel from your SSH server to your FreeBSD VM. I created an A record for my domain (e.g. idatum.net) that has the public IPv4 for the FreeBSD VM. I don't need to add an AAAA record, since the point of this is an IPv4 to IPv6 bridge. With NAT64/DNS64 on my IPv6-only VLAN, my SSH server gets the IPv6 with the DNS64 prefix I have in my OpenBSD router <code>unbound.conf</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># DNS64</span>
+<span class="n">module-config:</span> <span class="s">&quot;dns64 iterator&quot;</span>
+<span class="n">dns64-prefix:</span> <span class="mi">64</span>:<span class="n">ff9b::</span>/<span class="mi">96</span>
+</code></pre></div>
+
+<p>And on the same OpenBSD router, <code>/etc/pf.conf</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="gh">#</span> NAT64
+pass in inet6 from any to 64:ff9b::/96 af-to inet from ($int_if)
+</code></pre></div>
+
+<p>Now add your home SSH server's client public SSH key to your FreeBSD's <code>~/.ssh/authorized_keys</code>. This let's the SSH client on your server connect to the FreeBSD VM.</p>
+<p>I wrote a script that sets up the reverse SSH tunnel, running as the same user that has the SSH client key configured on the VM:</p>
+<div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span class="normal"> 1</span>
+<span class="normal"> 2</span>
+<span class="normal"> 3</span>
+<span class="normal"> 4</span>
+<span class="normal"> 5</span>
+<span class="normal"> 6</span>
+<span class="normal"> 7</span>
+<span class="normal"> 8</span>
+<span class="normal"> 9</span>
+<span class="normal">10</span>
+<span class="normal">11</span>
+<span class="normal">12</span>
+<span class="normal">13</span>
+<span class="normal">14</span>
+<span class="normal">15</span>
+<span class="normal">16</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="ch">#!/bin/sh</span>
+<span class="c1"># Open local port on FreeBSD VM to connect to this home SSH server.</span>
+<span class="nv">host</span><span class="o">=</span>your-freebsd-vm-dns-name.net
+<span class="nv">home_ssh_port</span><span class="o">=</span><span class="m">22</span>
+<span class="nv">vm_ssh_port</span><span class="o">=</span><span class="m">5001</span>
+<span class="nv">vm_local_port</span><span class="o">=</span><span class="m">5002</span>
+
+<span class="k">while</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="nb">true</span><span class="w"> </span><span class="o">]</span>
+<span class="k">do</span>
+<span class="w">    </span>ssh<span class="w"> </span>-NT<span class="w"> </span>-R<span class="w"> </span><span class="nv">$vm_local_port</span>:localhost:<span class="nv">$home_ssh_port</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-o<span class="w"> </span><span class="nv">ExitOnForwardFailure</span><span class="o">=</span>yes<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-o<span class="w"> </span><span class="nv">ServerAliveInterval</span><span class="o">=</span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-o<span class="w"> </span><span class="nv">ServerAliveCountMax</span><span class="o">=</span><span class="m">2</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-6<span class="w"> </span>-p<span class="w"> </span><span class="nv">$vm_ssh_port</span><span class="w"> </span>azureuser@<span class="nv">$host</span>
+<span class="w">    </span>sleep<span class="w"> </span><span class="m">1</span>
+<span class="k">done</span>
+</code></pre></div></td></tr></table></div>
+
+<p><code>host</code> is your DNS record that has your VM's IPv4 address. <code>home_ssh_port</code> is the home server SSH port (default port 22). <code>vm_ssh_port</code> is the port we configured earlier in your VM's NSG rules and sshd_config. <code>vm_local_port</code> is the port available at localhost on your VM.</p>
+<p>Once the SSH reverse tunnel is set up, you can log in from your FreeBSD VM to your home SSH server using port <code>vm_local_port</code>. From a remote client, use something like <code>ssh -t -p 5001 azureuser@your-freebsd-vm-dns-name.net ssh -p 5002 your_home_username@localhost</code> to log into your home SSH server directly. This connects to your FreeBSD VM and creates a terminal session via ssh with your home SSH server. You're in!</p>
+<h4>Additional tunnels</h4>
+<p>We now have a way to remotely connect to your home lab via a reverse SSH tunnel. What about remotely connecting to other home lab servers via your remote laptop? This needs another level if indirection with our SSH tunnels. Let's say you have Home Assistant running on an internal home lab address homeassistant.local. We need a way to tunnel from the home SSH server to that address and port. It looks like this:</p>
+<div class="highlight"><pre><span></span><code><span class="n">remote</span><span class="w"> </span><span class="n">client</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">FreeBSD</span><span class="w"> </span><span class="n">VM</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">home</span><span class="w"> </span><span class="n">SSH</span><span class="w"> </span><span class="n">server</span><span class="w"> </span><span class="o">--&gt;</span><span class="w"> </span><span class="n">homeassistant</span><span class="p">.</span><span class="kr">local</span><span class="p">.</span>
+</code></pre></div>
+
+<p>What we need is a local port on the home SSH server that connects to homeassistant.local -- an SSH local tunnel. What I do is run another script on the SSH server to set up the local SSH tunnel. Something like this:</p>
+<div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span class="normal"> 1</span>
+<span class="normal"> 2</span>
+<span class="normal"> 3</span>
+<span class="normal"> 4</span>
+<span class="normal"> 5</span>
+<span class="normal"> 6</span>
+<span class="normal"> 7</span>
+<span class="normal"> 8</span>
+<span class="normal"> 9</span>
+<span class="normal">10</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="ch">#!/bin/sh</span>
+<span class="c1"># Open local port on home SSH server to connect to HA.</span>
+<span class="nv">host</span><span class="o">=</span>homeassistant.local
+<span class="nv">ha_port</span><span class="o">=</span><span class="m">8123</span>
+
+<span class="k">while</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="nb">true</span><span class="w"> </span><span class="o">]</span>
+<span class="k">do</span>
+<span class="w">    </span>ssh<span class="w"> </span>-NT<span class="w"> </span>-L<span class="w"> </span><span class="nv">$ha_port</span>:localhost:<span class="nv">$ha_port</span><span class="w"> </span>ha_user@<span class="nv">$host</span>
+<span class="w">    </span>sleep<span class="w"> </span><span class="m">1</span>
+<span class="k">done</span>
+</code></pre></div></td></tr></table></div>
+
+<p>On the home SSH server, this sets up a local port <code>ha_port</code> that tunnels via ssh to the Home Assistant server.</p>
+<p>On the FreeBSD VM, I set up an SSH tunnel to connect to the Home Assistant port on the home SSH server:</p>
+<div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span class="normal"> 1</span>
+<span class="normal"> 2</span>
+<span class="normal"> 3</span>
+<span class="normal"> 4</span>
+<span class="normal"> 5</span>
+<span class="normal"> 6</span>
+<span class="normal"> 7</span>
+<span class="normal"> 8</span>
+<span class="normal"> 9</span>
+<span class="normal">10</span>
+<span class="normal">11</span>
+<span class="normal">12</span>
+<span class="normal">13</span>
+<span class="normal">14</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="ch">#!/bin/sh</span>
+<span class="c1"># Open local port on FreeBSD VM to connect to HA port on home SSH server.</span>
+<span class="nv">vm_local_port</span><span class="o">=</span><span class="m">5002</span>
+<span class="nv">ha_port</span><span class="o">=</span><span class="m">8123</span>
+
+<span class="k">while</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="nb">true</span><span class="w"> </span><span class="o">]</span>
+<span class="k">do</span>
+<span class="w">    </span>ssh<span class="w"> </span>-NT<span class="w"> </span>-L<span class="w"> </span><span class="nv">$ha_port</span>:localhost:<span class="nv">$ha_port</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-o<span class="w"> </span><span class="nv">CheckHostIp</span><span class="o">=</span>no<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-o<span class="w"> </span><span class="nv">ExitOnForwardFailure</span><span class="o">=</span>yes<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-v<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-p<span class="w"> </span><span class="nv">$vm_local_port</span><span class="w"> </span>home_user@localhost
+<span class="w">    </span>sleep<span class="w"> </span><span class="m">1</span>
+<span class="k">done</span>
+</code></pre></div></td></tr></table></div>
+
+<p>This uses the local SSH reverse proxy <code>vm_local_port</code> to your home SSH server to create a local <code>ha_port</code>. Now from your remote client, you can set up an SSH local port to tunnel all the way through so you can use your browser to connect to <code>http://localhost:8123</code>:</p>
+<div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span class="normal"> 1</span>
+<span class="normal"> 2</span>
+<span class="normal"> 3</span>
+<span class="normal"> 4</span>
+<span class="normal"> 5</span>
+<span class="normal"> 6</span>
+<span class="normal"> 7</span>
+<span class="normal"> 8</span>
+<span class="normal"> 9</span>
+<span class="normal">10</span>
+<span class="normal">11</span>
+<span class="normal">12</span>
+<span class="normal">13</span>
+<span class="normal">14</span>
+<span class="normal">15</span></pre></div></td><td class="code"><div><pre><span></span><code><span class="ch">#!/bin/sh</span>
+<span class="c1"># Client to open local HA port connected to HA port on FreeBSD VM connected to HA port on home SSH server.</span>
+<span class="nv">host</span><span class="o">=</span>your-freebsd-vm-dns-name.net
+<span class="nv">ha_port</span><span class="o">=</span><span class="m">8123</span>
+<span class="nv">vm_ssh_port</span><span class="o">=</span><span class="m">5001</span>
+
+<span class="k">while</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="nb">true</span><span class="w"> </span><span class="o">]</span>
+<span class="k">do</span>
+<span class="w">    </span>ssh<span class="w"> </span>-NT<span class="w"> </span>-L<span class="w"> </span><span class="nv">$ha_port</span>:localhost:<span class="nv">$ha_port</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-o<span class="w"> </span><span class="nv">CheckHostIp</span><span class="o">=</span>no<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-o<span class="w"> </span><span class="nv">ExitOnForwardFailure</span><span class="o">=</span>yes<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-v<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>-4<span class="w"> </span>-p<span class="w"> </span><span class="nv">$vm_ssh_port</span><span class="w"> </span>azureuser@<span class="nv">$host</span>
+<span class="w">    </span>sleep<span class="w"> </span><span class="m">1</span>
+<span class="k">done</span>
+</code></pre></div></td></tr></table></div>
+
+<p>Yep, this has a few layers! The key is to capture this in scripts with comments so you don't have to think about it everytime. On the servers, I run the scripts as daemons (@reboot in crontab works). Rest assured, I use this often to check in on my home automation status when remote with only IPv4 and it works great.</p>
+<h4>FreeBSD and .NET and ZFS</h4>
+<p>A quick note that FreeBSD has support for .NET. When I wrote this, I was running FreeBSD 14.1 and using .NET 8. Microsoft's .NET has been open source and supported on Linux for many years now. It's great to see the FreeBSD community and Microsoft work together to make .NET development available for FreeBSD.</p>
+<p>I also really appreciate having ZFS on my VM. I can now create ZFS snapshots and do simple backups.</p>
+<h4>Conclusion</h4>
+<p>I'm happy with my Azure FreeBSD VM. When I'm remote and don't have IPv6, I can tunnel through my inexpensive VM and get access to my IPv6-only home lab. And I can also host my simple website I use for checking on my weather station.</p>
+<p>There is only trust from my home SSH server to my FreeBSD VM. The FreeBSD VM is not trusted by my home server -- only by creating the SSH reverse tunnel can the VM access my home lab. My SSH server running in a FreeBSD jail has stict configuration including SSH key only authorization.</p>
+<p>I'll find other uses for my FreeBSD VM running on Azure. Perhaps I'll start experimenting with sending ZFS snapshots from my home ZFS server for an additional backup.</p>
+<p>Yes, I could have used a Linux VM on another cloud provider. I chose Azure and it delivers a solid FreeBSD VM with that familiar BSD experience.</p>
+<p>Cheers to the BSDs!</p>
+    <div class="clear"></div>
+
+    <div class="hidden">
+        <br/>
+        <a href="./category/bsd.html" rel="tag">BSD</a>
+    </div>
+</article>            <div class="clear"></div>
+            <footer>
+                <a rel="me" href="https://mastodon.sdf.org/@joelp">© 2024 mastodon.sdf.org/@joelp</a>
+                <br/>
+                <a href="https://github.com/idatum">GitHub repos</a>
+                &middot;
+                <a href="./feeds/all.atom.xml" rel="alternate">Atom Feed</a>
+            </footer>
+        </div>
+        <div class="clear"></div>
+    </div>
+</body>
+</html>

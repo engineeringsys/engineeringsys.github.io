@@ -1,0 +1,23 @@
+﻿a {
+  color: #0366d6;
+}
+
+body {
+  margin-bottom: 60px;
+  background-color: #99aa99;
+}
+
+table {
+  border: 1px solid black;
+}
+
+tr td {
+  border: 1px solid gray;
+  padding: 1px !important;
+  margin: 1px !important;
+}
+
+code {
+  color: black;
+  font-family: monospace
+}

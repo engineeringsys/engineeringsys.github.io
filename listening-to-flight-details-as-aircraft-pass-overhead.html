@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+        <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>lab3 | Listening to flight details as aircraft pass overhead</title>
+    <link rel="shortcut icon" type="image/png" href="./favicon.png">
+    <link rel="shortcut icon" type="image/x-icon" href="./favicon.ico">
+    <link href="https://idatum.net/feeds/all.atom.xml" type="application/atom+xml" rel="alternate" title="lab3 Full Atom Feed" />
+    <link href="https://idatum.net/feeds/sdr.atom.xml" type="application/atom+xml" rel="alternate" title="lab3 Categories Atom Feed" />
+    <link rel="stylesheet" href="./theme/css/main.css" type="text/css" />
+    <link rel="stylesheet" href="./theme/css/pygments.css" type="text/css" />
+    <meta name="generator" content="Pelican" />
+    <meta name="description" content="" />
+    <meta name="author" content="@joelp@mastodon.sdf.org" />
+
+    <meta name="keywords" content="FreeBSD,Rock64,ADS-B,dump1090,MQTT,dotnet" />
+</head>
+<body>
+    <header>
+        <nav style="overflow: hidden;">
+            <ul>
+                <li><a href="./">Home</a></li>
+                    <li><a href="./category/bsd.html">BSD</a></li>
+                    <li><a href="./category/home-automation.html">Home automation</a></li>
+                    <li class="active"><a href="./category/sdr.html">SDR</a></li>
+            </ul>
+        </nav>
+        <div>
+        <h1><a href="./">
+            <image src='' class="avatar" width="50px" /><span class="site_title">lab3</span>
+            </a></h1></div>
+            <h2>case studies and observations</h2>
+        </div>
+    </header>
+    <div id="wrapper">
+        <div id="content">    <h4 class="date">Dec 17, 2023</h4>
+
+<article class="post">
+    <h2 class="title">
+        <a href="./listening-to-flight-details-as-aircraft-pass-overhead.html" rel="bookmark" title="Permanent Link to &quot;Listening to flight details as aircraft pass overhead&quot;">Listening to flight details as aircraft pass overhead</a>
+    </h2>
+
+                
+    <p>I live near a busy airport. I can see aircraft flying low enough to make out and guess the airline and model. Wouldn't it be cool to have my computer tell me instead of guessing? Also, it would be nice to know the departure/arrival country and city.</p>
+<p>Here are some notes to share on how I use <a href="/ads-b-on-a-rock64-with-freebsd-stable14.html">my ADS-B RTL-SDR receiver</a>, <a href="https://github.com/idatum/adsb2mqtt">adsb2mqtt</a> and an MQTT broker, and text-to-speech (TTS) to play details of nearby passing aircraft.</p>
+<h4>Publishing MQTT messages with ADS-B details</h4>
+<p>As explained in <a href="/ads-b-on-a-rock64-with-freebsd-stable14.html">ADS-B on a Rock64 with FreeBSD</a> I run the FlightAware maintained <a href="https://github.com/flightaware/dump1090">dump1090-fa</a> on a FreeBSD device in an outdoor enclosure that is close to my 1090mhz ADS-B antenna.</p>
+<p>I run <a href="https://github.com/idatum/adsb2mqtt/blob/main/Dockerfile">adsb2mqtt</a> in a Docker container (Debian server) that connects to the dump1090-fa port 30003. That repo has details on parameters to adjust which aircraft are processed (i.e. ones you can see from your own location).</p>
+<p>This setup has been stable for several months since I switched from running everying on an RPi3 (yes, .NET works on a Raspberry Pi), but you can use anything to host dump1090-fa or run adsb2mqtt with .NET.</p>
+<p>Ultimately, I'm now able to process ADS-B messages and publish them to my MQTT broker -- an MQTT client can subscribe to messages of locally passing aircaft.</p>
+<h4>Enhancing with flight and airline information</h4>
+<p>Now that I can have an MQTT client subscribe to ADS-B info, I can receive altitude and distance, latitude/longitude, speed, heading, and flight and aircraft (ICAO) numbers.</p>
+<p>In order to get more details such as departure/arrival city, more aircraft details, and airline information, we need to access a database of that information. I use a combination FlightAware's JSON files that come with dump1090-fa (<a href="https://github.com/flightaware/dump1090/tree/master/public_html/db">dump1090/public_html/db</a>) and FlightAware's AeroAPI. AeroAPI has a free tier based on the number of requests which is more than enough for my use.</p>
+<p>I have this implemented in a Python class <a href="https://github.com/idatum/adsb2mqtt/blob/main/examples/adsb_speech_aeroapi.py">AdsbSpeech</a> that I use in a <a href="https://pypi.org/project/paho-mqtt/">Paho MQTT</a> Python client (again, I have this running in Docker). The <code>flight</code> parameter is the JSON payload from the adsb2mqtt message.</p>
+<p>With this, I have Python code that can generate a text sentence describing the flight. Using this in a Python MQTT client subscribed to adsb2mqtt messages, I can publish back an MQTT message so any MQTT client that can do TTS can speak that sentence.</p>
+<p>As an optimization, I make sure I only publish that message every 30 seconds, as ADS-B info comes in quickly. For an airline passing over at ~5000ft MSL that's about 2 or 3 total messages before it passes outside of my 2.3 nautical mile radius filter.</p>
+<h4>Using Azure for TTS</h4>
+<p>Now that I can generate a sentence describing a passing flight, any TTS solution works. If you have Home Assistant Assist set up, that would probably work well (although I never tried).</p>
+<p>I use Azure Speech service to generate a wave file. It's cheap and easy to use, and I like their voices. Here's an abbreviated Python code snippet that generates a temporary wave file:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">tempfile</span><span class="w"> </span><span class="kn">import</span><span class="w"> </span><span class="n">NamedTemporaryFile</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">azure.cognitiveservices.speech</span><span class="w"> </span><span class="kn">import</span><span class="w"> </span><span class="n">SpeechConfig</span><span class="p">,</span><span class="w"> </span><span class="n">SpeechSynthesizer</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">azure.cognitiveservices.speech.audio</span><span class="w"> </span><span class="kn">import</span><span class="w"> </span><span class="n">AudioOutputConfig</span>
+
+<span class="n">Speech_config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SpeechConfig</span><span class="p">(</span><span class="n">subscription</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s1">&#39;COGS_KEY&#39;</span><span class="p">],</span><span class="w"> </span><span class="n">region</span><span class="o">=</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s1">&#39;COGS_REGION&#39;</span><span class="p">])</span>
+
+<span class="k">def</span><span class="w"> </span><span class="nf">create_wave</span><span class="p">(</span><span class="n">text</span><span class="p">):</span>
+<span class="w">    </span><span class="n">filename</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">NamedTemporaryFile</span><span class="p">(</span><span class="nb">dir</span><span class="o">=</span><span class="s1">&#39;/var/www/wav&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">.wav&quot;</span>
+<span class="w">    </span><span class="n">audio_config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">AudioOutputConfig</span><span class="p">(</span><span class="n">filename</span><span class="o">=</span><span class="n">filename</span><span class="p">)</span>
+<span class="w">    </span><span class="n">ssml</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sa">f</span><span class="s1">&#39;&lt;speak version=&quot;1.0&quot; xmlns=&quot;http://www.w3.org/2001/10/synthesis&quot; </span><span class="se">\</span>
+<span class="s1">        xmlns:mstts=&quot;https://www.w3.org/2001/mstts&quot; xml:lang=&quot;en-US&quot;&gt; </span><span class="se">\</span>
+<span class="s1">        &lt;voice name=&quot;en-US-JennyNeural&quot;&gt; </span><span class="se">\</span>
+<span class="s1">        &lt;mstts:express-as style=&quot;newscast&quot;&gt; </span><span class="se">\</span>
+<span class="s1">            &lt;prosody rate=&quot;+25.00%&quot;&gt; </span><span class="se">\</span>
+<span class="s1">            </span><span class="si">{</span><span class="n">text</span><span class="si">}</span><span class="s1"> </span><span class="se">\</span>
+<span class="s1">            &lt;/prosody&gt; </span><span class="se">\</span>
+<span class="s1">        &lt;/mstts:express-as&gt; </span><span class="se">\</span>
+<span class="s1">        &lt;/voice&gt; </span><span class="se">\</span>
+<span class="s1">        &lt;/speak&gt;&#39;</span>
+<span class="w">    </span><span class="n">synthesizer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">SpeechSynthesizer</span><span class="p">(</span><span class="n">speech_config</span><span class="o">=</span><span class="n">Speech_config</span><span class="p">,</span><span class="w"> </span><span class="n">audio_config</span><span class="o">=</span><span class="n">audio_config</span><span class="p">)</span>
+<span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">synthesizer</span><span class="o">.</span><span class="n">speak_ssml_async</span><span class="p">(</span><span class="n">ssml</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">filename</span>
+</code></pre></div>
+
+<p>One more optimization that I do is make sure I only generate a single wave file available to all clients that happen to be running. For example, I have a client on the upstairs balcony, in WSL2 on my Win11 laptop, even one on my Android phone running <a href="https://github.com/termux">termux with termux-api</a>.</p>
+<p>What I do is create the TTS wave file, publish the wave filename in MQTT, and a Python Flask app (again, Docker) can access that wave file and allow clients to download. Now MQTT clients can be really simple and no need to have keys to my Azure account etc on other clients. Here's a snippet of a shell script I run in WSL2 on my laptop that will play the wave for passing aircraft:</p>
+<div class="highlight"><pre><span></span><code><span class="ch">#!/bin/sh</span>
+
+<span class="k">while</span><span class="w"> </span><span class="nb">true</span>
+<span class="k">do</span>
+<span class="w">    </span>mosquitto_sub<span class="w"> </span>-v<span class="w"> </span>-t<span class="w"> </span><span class="s2">&quot;ADSB/speech/wave&quot;</span><span class="w"> </span>-u<span class="w"> </span>mosquitto_sub<span class="w"> </span>-P<span class="w"> </span><span class="k">$(</span>cat<span class="w"> </span>~/.mosquitto_sub<span class="k">)</span><span class="w"> </span>-h<span class="w"> </span>mqtt.host<span class="w"> </span>-p<span class="w"> </span><span class="m">8883</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>msg
+<span class="w">    </span><span class="k">do</span>
+<span class="w">        </span><span class="nv">wave</span><span class="o">=</span><span class="k">$(</span><span class="nb">echo</span><span class="w"> </span><span class="nv">$msg</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span><span class="s1">&#39;{print $2}&#39;</span><span class="k">)</span>
+<span class="w">        </span>curl<span class="w"> </span>--silent<span class="w"> </span>--output<span class="w"> </span>-<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: text/plain&quot;</span><span class="w"> </span>--data<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">wave</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;http:myserver/speech/wave&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>paplay
+<span class="w">    </span><span class="k">done</span>
+<span class="k">done</span>
+</code></pre></div>
+
+<p>In this case, it's just about getting audio to work on Linux (no small feat).</p>
+<h4>Summary</h4>
+<ol>
+<li>dump1090-fa feeds adsb2mqtt raw ADS-B data; adsb2mqtt generates MQTT messages for nearby flights, filtered by distance from my home.</li>
+<li>An MQTT client uses AdsbSpeech class to enhance data and generate a sentence to be used for TTS.</li>
+<li>Another MQTT client uses Azure Speech to generate and share via HTTP a generated wave file and publishes the filename to MQTT.</li>
+<li>Various devices can use simple client tools like mosquitto_sub and curl to retrieve and play the wave file. </li>
+</ol>
+<p>It's a simple pleasure to sit on my balcony and enjoy some plane spotting, now with details played back from my computer.</p>
+    <div class="clear"></div>
+
+    <div class="hidden">
+        <br/>
+        <a href="./category/sdr.html" rel="tag">SDR</a>
+        &nbsp;&middot;
+            &nbsp;<a href="./tag/freebsd.html" class="tags">FreeBSD</a>
+            &nbsp;<a href="./tag/rock64.html" class="tags">Rock64</a>
+            &nbsp;<a href="./tag/ads-b.html" class="tags">ADS-B</a>
+            &nbsp;<a href="./tag/dump1090.html" class="tags">dump1090</a>
+            &nbsp;<a href="./tag/mqtt.html" class="tags">MQTT</a>
+            &nbsp;<a href="./tag/dotnet.html" class="tags">dotnet</a>
+    </div>
+</article>            <div class="clear"></div>
+            <footer>
+                <a rel="me" href="https://mastodon.sdf.org/@joelp">© 2024 mastodon.sdf.org/@joelp</a>
+                <br/>
+                <a href="https://github.com/idatum">GitHub repos</a>
+                &middot;
+                <a href="./feeds/all.atom.xml" rel="alternate">Atom Feed</a>
+            </footer>
+        </div>
+        <div class="clear"></div>
+    </div>
+</body>
+</html>
